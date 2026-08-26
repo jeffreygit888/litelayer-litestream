@@ -122,22 +122,10 @@ contract LiteStream {
         emit StreamCanceled(streamId, stream.sender, recipientDue, senderRefund);
     }
 
-    function getStream(uint256 streamId)
-        external view
-        returns (
-            address sender,address recipient,uint256 deposit,uint256 withdrawn,
-            uint64 startTime,uint64 endTime,bool cancelable,bool canceled,uint64 canceledAt,
-            uint256 vested,uint256 withdrawable
-        )
-    {
+    function getStream(uint256 streamId) external view returns (Stream memory) {
         Stream memory stream = streams[streamId];
         require(stream.sender != address(0), "Stream not found");
-
-        return (
-            stream.sender, stream.recipient, stream.deposit, stream.withdrawn,
-            stream.startTime, stream.endTime, stream.cancelable, stream.canceled,
-            stream.canceledAt, vestedAmount(streamId), withdrawableAmount(streamId)
-        );
+        return stream;
     }
 
     receive() external payable {
