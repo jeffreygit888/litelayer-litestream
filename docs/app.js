@@ -45,6 +45,14 @@ async function connectWallet() {
   } catch (e) { $("walletStatus").textContent = readableError(e); }
 }
 
+async function feeOverrides() {
+  const latestBlock = await provider.getBlock("latest");
+  const baseFee = latestBlock?.baseFeePerGas || 0n;
+  const priorityFee = ethers.parseUnits("0.1", "gwei");
+  const maxFeePerGas = baseFee > 0n ? (baseFee * 150n) / 100n + priorityFee : ethers.parseUnits("5", "gwei");
+  return { baseFee, priorityFee, maxFeePerGas };
+}
+
 async function sendWithEstimatedGas(txRequest) {
   await ensureLiteForge();
   let estimated;
@@ -53,14 +61,10 @@ async function sendWithEstimatedGas(txRequest) {
   } catch (e) {
     throw new Error(`Gas estimation failed. ${readableError(e)}`);
   }
-  const gasLimit = (estimated * 130n) / 100n + 10000n;
-  const latestBlock = await provider.getBlock("latest");
-  const baseFee = latestBlock?.baseFeePerGas || 0n;
-  const priorityFee = ethers.parseUnits("0.1", "gwei");
-  const maxFeePerGas = baseFee > 0n ? (baseFee * 150n) / 100n + priorityFee : undefined;
-  const feeOverrides = maxFeePerGas ? {maxFeePerGas, maxPriorityFeePerGas: priorityFee} : {};
+  const gasLimit = (estimated * 150n) / 100n + 10000n;
+  const {baseFee, priorityFee, maxFeePerGas} = await feeOverrides();
   try {
-    const tx = await signer.sendTransaction({...txRequest, gasLimit, ...feeOverrides});
+    const tx = await signer.sendTransaction({...txRequest, gasLimit, maxFeePerGas, maxPriorityFeePerGas: priorityFee});
     return {tx, gasLimit, estimated, baseFee, maxFeePerGas};
   } catch (e) {
     const wrapped = new Error(`Transaction submission failed. ${readableError(e)}`);
@@ -77,26 +81,36 @@ async function fundTestWallet() {
     if (!amount || Number(amount) <= 0) throw new Error("Amount must be greater than zero.");
     if (recipient.toLowerCase() === connectedAddress.toLowerCase()) throw new Error("Recipient must be another wallet.");
     $("fundBtn").disabled = true;
-    $("fundResult").textContent = "Reading latest LitVM base fee...";
+    $("fundResult").textContent = "Estimating LiteForge native-transfer gas...";
     await ensureLiteForge();
 
-    const latestBlock = await provider.getBlock("latest");
-    if (!latestBlock) throw new Error("Could not read latest LitVM block.");
-    const baseFee = latestBlock.baseFeePerGas || 0n;
-    const priorityFee = ethers.parseUnits("0.1", "gwei");
-    const maxFeePerGas = baseFee > 0n ? (baseFee * 150n) / 100n + priorityFee : ethers.parseUnits("5", "gwei");
     const value = ethers.parseEther(amount);
+    let estimated;
+    try {
+      estimated = await provider.estimateGas({
+        from: connectedAddress,
+        to: recipient,
+        value
+      });
+    } catch (e) {
+      throw new Error(`Native transfer gas estimation failed. ${readableError(e)}`);
+    }
+
+    const gasLimit = (estimated * 150n) / 100n + 10000n;
+    const {baseFee, priorityFee, maxFeePerGas} = await feeOverrides();
 
     $("fundResult").textContent = [
-      "Preparing native zkLTC transfer...",
+      `Estimated gas: ${estimated}`,
+      `Gas limit: ${gasLimit}`,
       `Base fee: ${ethers.formatUnits(baseFee, "gwei")} Gwei`,
-      `Max fee: ${ethers.formatUnits(maxFeePerGas, "gwei")} Gwei`
+      `Max fee: ${ethers.formatUnits(maxFeePerGas, "gwei")} Gwei`,
+      "Waiting for MetaMask confirmation..."
     ].join("\n");
 
     const tx = await signer.sendTransaction({
       to: recipient,
       value,
-      gasLimit: 21000n,
+      gasLimit,
       maxFeePerGas,
       maxPriorityFeePerGas: priorityFee
     });
@@ -108,6 +122,8 @@ async function fundTestWallet() {
       `Tx: ${tx.hash}`,
       `Sent: ${amount} zkLTC`,
       `To: ${recipient}`,
+      `Estimated gas: ${estimated}`,
+      `Gas limit: ${gasLimit}`,
       `Base fee used for quote: ${ethers.formatUnits(baseFee, "gwei")} Gwei`,
       `Max fee: ${ethers.formatUnits(maxFeePerGas, "gwei")} Gwei`
     ].join("\n");
