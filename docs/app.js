@@ -41,7 +41,7 @@ async function connectWallet() {
     contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
     $("walletStatus").textContent = `Connected: ${connectedAddress}`;
     $("connectBtn").textContent = "Wallet Connected";
-    ["createBtn","inspectBtn","withdrawBtn","cancelBtn"].forEach(id => $(id).disabled = false);
+    ["createBtn","fundBtn","inspectBtn","withdrawBtn","cancelBtn"].forEach(id => $(id).disabled = false);
   } catch (e) { $("walletStatus").textContent = readableError(e); }
 }
 
@@ -54,9 +54,14 @@ async function sendWithEstimatedGas(txRequest) {
     throw new Error(`Gas estimation failed. ${readableError(e)}`);
   }
   const gasLimit = (estimated * 130n) / 100n + 10000n;
+  const latestBlock = await provider.getBlock("latest");
+  const baseFee = latestBlock?.baseFeePerGas || 0n;
+  const priorityFee = ethers.parseUnits("0.1", "gwei");
+  const maxFeePerGas = baseFee > 0n ? (baseFee * 150n) / 100n + priorityFee : undefined;
+  const feeOverrides = maxFeePerGas ? {maxFeePerGas, maxPriorityFeePerGas: priorityFee} : {};
   try {
-    const tx = await signer.sendTransaction({...txRequest, gasLimit});
-    return {tx, gasLimit, estimated};
+    const tx = await signer.sendTransaction({...txRequest, gasLimit, ...feeOverrides});
+    return {tx, gasLimit, estimated, baseFee, maxFeePerGas};
   } catch (e) {
     const wrapped = new Error(`Transaction submission failed. ${readableError(e)}`);
     wrapped.original = e;
@@ -64,52 +69,74 @@ async function sendWithEstimatedGas(txRequest) {
   }
 }
 
-async function createStream() {
+async function fundTestWallet() {
   try {
-    const recipient = $("recipientInput").value.trim();
-    const amount = $("amountInput").value.trim();
-    const durationMinutes = Number($("durationInput").value);
-    const cancelable = $("cancelableInput").checked;
+    const recipient = $("fundRecipientInput").value.trim();
+    const amount = $("fundAmountInput").value.trim();
     if (!ethers.isAddress(recipient)) throw new Error("Invalid recipient address.");
     if (!amount || Number(amount) <= 0) throw new Error("Amount must be greater than zero.");
-    if (!Number.isFinite(durationMinutes) || durationMinutes < 2) throw new Error("Use a duration of at least 2 minutes.");
-    $("createBtn").disabled = true;
-    $("createResult").textContent = "Reading latest LitVM block...";
+    if (recipient.toLowerCase() === connectedAddress.toLowerCase()) throw new Error("Recipient must be another wallet.");
+    $("fundBtn").disabled = true;
+    $("fundResult").textContent = "Reading latest LitVM base fee...";
+    await ensureLiteForge();
 
     const latestBlock = await provider.getBlock("latest");
     if (!latestBlock) throw new Error("Could not read latest LitVM block.");
-    const startTime = BigInt(latestBlock.timestamp + 300);
-    const endTime = startTime + BigInt(Math.floor(durationMinutes * 60));
+    const baseFee = latestBlock.baseFeePerGas || 0n;
+    const priorityFee = ethers.parseUnits("0.1", "gwei");
+    const maxFeePerGas = baseFee > 0n ? (baseFee * 150n) / 100n + priorityFee : ethers.parseUnits("5", "gwei");
     const value = ethers.parseEther(amount);
-    const data = contract.interface.encodeFunctionData("createStream", [recipient, startTime, endTime, cancelable]);
 
-    $("createResult").textContent = `Estimating gas...\nStart scheduled: ${new Date(Number(startTime)*1000).toISOString()}`;
-    const {tx, gasLimit, estimated} = await sendWithEstimatedGas({to:CONTRACT_ADDRESS,data,value});
-    $("createResult").textContent = `Submitted: ${tx.hash}\nWaiting for confirmation...`;
+    $("fundResult").textContent = [
+      "Preparing native zkLTC transfer...",
+      `Base fee: ${ethers.formatUnits(baseFee, "gwei")} Gwei`,
+      `Max fee: ${ethers.formatUnits(maxFeePerGas, "gwei")} Gwei`
+    ].join("\n");
+
+    const tx = await signer.sendTransaction({
+      to: recipient,
+      value,
+      gasLimit: 21000n,
+      maxFeePerGas,
+      maxPriorityFeePerGas: priorityFee
+    });
+
+    $("fundResult").textContent = `Submitted: ${tx.hash}\nWaiting for confirmation...`;
     const receipt = await tx.wait();
-    const count = await contract.streamCount();
-    $("createResult").textContent = [
+    $("fundResult").textContent = [
       `Confirmed in block ${receipt.blockNumber}`,
       `Tx: ${tx.hash}`,
-      `Estimated gas: ${estimated}`,
-      `Gas limit: ${gasLimit}`,
-      `Stream ID: ${count}`,
-      `Deposit: ${amount} zkLTC`,
-      `Starts: ${new Date(Number(startTime)*1000).toISOString()}`,
-      `Ends: ${new Date(Number(endTime)*1000).toISOString()}`,
-      `Cancelable: ${cancelable}`
+      `Sent: ${amount} zkLTC`,
+      `To: ${recipient}`,
+      `Base fee used for quote: ${ethers.formatUnits(baseFee, "gwei")} Gwei`,
+      `Max fee: ${ethers.formatUnits(maxFeePerGas, "gwei")} Gwei`
     ].join("\n");
-    ["inspectIdInput","withdrawIdInput","cancelIdInput"].forEach(id => $(id).value = count.toString());
-  } catch(e) {
+  } catch (e) {
     console.error(e);
-    $("createResult").textContent = readableError(e.original || e);
-  } finally { $("createBtn").disabled = false; }
+    $("fundResult").textContent = readableError(e.original || e);
+  } finally { $("fundBtn").disabled = false; }
 }
 
-function statusOf(stream){if(stream.canceled)return "Canceled";const now=Math.floor(Date.now()/1000);if(now<Number(stream.startTime))return "Scheduled";if(now>=Number(stream.endTime))return "Completed";return "Streaming";}
+async function createStream() {
+  try {
+    const recipient=$("recipientInput").value.trim(); const amount=$("amountInput").value.trim(); const durationMinutes=Number($("durationInput").value); const cancelable=$("cancelableInput").checked;
+    if(!ethers.isAddress(recipient)) throw new Error("Invalid recipient address.");
+    if(!amount||Number(amount)<=0) throw new Error("Amount must be greater than zero.");
+    if(!Number.isFinite(durationMinutes)||durationMinutes<2) throw new Error("Use a duration of at least 2 minutes.");
+    $("createBtn").disabled=true; $("createResult").textContent="Reading latest LitVM block...";
+    const latestBlock=await provider.getBlock("latest"); if(!latestBlock) throw new Error("Could not read latest LitVM block.");
+    const startTime=BigInt(latestBlock.timestamp+300); const endTime=startTime+BigInt(Math.floor(durationMinutes*60)); const value=ethers.parseEther(amount);
+    const data=contract.interface.encodeFunctionData("createStream",[recipient,startTime,endTime,cancelable]);
+    const {tx,gasLimit,estimated}=await sendWithEstimatedGas({to:CONTRACT_ADDRESS,data,value});
+    $("createResult").textContent=`Submitted: ${tx.hash}\nWaiting for confirmation...`; const receipt=await tx.wait(); const count=await contract.streamCount();
+    $("createResult").textContent=[`Confirmed in block ${receipt.blockNumber}`,`Tx: ${tx.hash}`,`Estimated gas: ${estimated}`,`Gas limit: ${gasLimit}`,`Stream ID: ${count}`,`Deposit: ${amount} zkLTC`,`Starts: ${new Date(Number(startTime)*1000).toISOString()}`,`Ends: ${new Date(Number(endTime)*1000).toISOString()}`,`Cancelable: ${cancelable}`].join("\n");
+    ["inspectIdInput","withdrawIdInput","cancelIdInput"].forEach(id=>$(id).value=count.toString());
+  } catch(e){console.error(e);$("createResult").textContent=readableError(e.original||e);} finally{$("createBtn").disabled=false;}
+}
 
+function statusOf(stream){if(stream.canceled)return"Canceled";const now=Math.floor(Date.now()/1000);if(now<Number(stream.startTime))return"Scheduled";if(now>=Number(stream.endTime))return"Completed";return"Streaming";}
 async function inspectStream(){try{const id=$("inspectIdInput").value.trim();if(!id)throw new Error("Stream ID is required.");await ensureLiteForge();const stream=await contract.getStream(id);const vested=await contract.vestedAmount(id);const withdrawable=await contract.withdrawableAmount(id);const pct=stream.deposit===0n?0:Number((vested*10000n)/stream.deposit)/100;$("streamMeter").classList.remove("hidden");$("meterText").textContent=`${Math.min(pct,100).toFixed(2)}%`;$("meterBar").style.width=`${Math.min(pct,100)}%`;$("inspectResult").textContent=[`Stream ID: ${id}`,`Status: ${statusOf(stream)}`,`Sender: ${stream.sender}`,`Recipient: ${stream.recipient}`,`Deposit: ${ethers.formatEther(stream.deposit)} zkLTC`,`Vested: ${ethers.formatEther(vested)} zkLTC`,`Withdrawn: ${ethers.formatEther(stream.withdrawn)} zkLTC`,`Withdrawable now: ${ethers.formatEther(withdrawable)} zkLTC`,`Starts: ${new Date(Number(stream.startTime)*1000).toISOString()}`,`Ends: ${new Date(Number(stream.endTime)*1000).toISOString()}`,`Cancelable: ${stream.cancelable}`,`Canceled: ${stream.canceled}`].join("\n");}catch(e){$("inspectResult").textContent=readableError(e);}}
 async function withdrawStream(){try{const id=$("withdrawIdInput").value.trim();if(!id)throw new Error("Stream ID is required.");$("withdrawBtn").disabled=true;const available=await contract.withdrawableAmount(id);if(available===0n)throw new Error("Nothing is withdrawable yet.");const data=contract.interface.encodeFunctionData("withdraw",[id]);const{tx,gasLimit}=await sendWithEstimatedGas({to:CONTRACT_ADDRESS,data,value:0n});$("withdrawResult").textContent=`Submitted: ${tx.hash}\nWaiting for confirmation...`;const receipt=await tx.wait();$("withdrawResult").textContent=`Withdrawal confirmed in block ${receipt.blockNumber}\nTx: ${tx.hash}\nGas limit: ${gasLimit}\nAvailable before withdrawal: ${ethers.formatEther(available)} zkLTC`;}catch(e){$("withdrawResult").textContent=readableError(e.original||e);}finally{$("withdrawBtn").disabled=false;}}
 async function cancelStream(){try{const id=$("cancelIdInput").value.trim();if(!id)throw new Error("Stream ID is required.");$("cancelBtn").disabled=true;const stream=await contract.getStream(id);if(stream.sender.toLowerCase()!==connectedAddress.toLowerCase())throw new Error("Only the stream sender can cancel.");if(!stream.cancelable)throw new Error("This stream is not cancelable.");if(stream.canceled)throw new Error("This stream is already canceled.");const data=contract.interface.encodeFunctionData("cancelStream",[id]);const{tx,gasLimit}=await sendWithEstimatedGas({to:CONTRACT_ADDRESS,data,value:0n});$("cancelResult").textContent=`Submitted: ${tx.hash}\nWaiting for confirmation...`;const receipt=await tx.wait();$("cancelResult").textContent=`Stream ${id} canceled in block ${receipt.blockNumber}\nTx: ${tx.hash}\nGas limit: ${gasLimit}\nRecipient keeps vested funds; sender receives only the unvested remainder.`;}catch(e){$("cancelResult").textContent=readableError(e.original||e);}finally{$("cancelBtn").disabled=false;}}
 
-$("connectBtn").addEventListener("click",connectWallet);$("createBtn").addEventListener("click",createStream);$("inspectBtn").addEventListener("click",inspectStream);$("withdrawBtn").addEventListener("click",withdrawStream);$("cancelBtn").addEventListener("click",cancelStream);if(window.ethereum){window.ethereum.on("chainChanged",()=>window.location.reload());window.ethereum.on("accountsChanged",()=>window.location.reload());}
+$("connectBtn").addEventListener("click",connectWallet);$("fundBtn").addEventListener("click",fundTestWallet);$("createBtn").addEventListener("click",createStream);$("inspectBtn").addEventListener("click",inspectStream);$("withdrawBtn").addEventListener("click",withdrawStream);$("cancelBtn").addEventListener("click",cancelStream);if(window.ethereum){window.ethereum.on("chainChanged",()=>window.location.reload());window.ethereum.on("accountsChanged",()=>window.location.reload());}
